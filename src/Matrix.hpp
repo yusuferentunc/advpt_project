@@ -1,0 +1,429 @@
+#pragma once
+
+#include <fstream>
+#include <iostream>
+#include <stdio.h>
+#include <memory>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <stdexcept>
+#include <vector>
+#include <cassert>
+#include <utility>
+#include <omp.h>
+#include <math.h>
+
+#define cimg_display 0
+
+#include "CImg.h"
+
+using namespace cimg_library;
+
+template< class T >
+concept Arithmetic = std::is_arithmetic_v< T >;
+
+template< Arithmetic ComponentType >    
+class Matrix
+{
+public:
+    // Default-constructor.
+    Matrix() = delete;
+
+    // Constructor for matrix of certain size.
+    explicit Matrix(size_t rows, size_t cols) : shape({rows, cols}), originalShape({rows, cols}),
+        buffer(std::vector<ComponentType>(rows * cols, 0.0)) { };
+
+    // Constructor for matrix of certain size with constant fill-value.
+    Matrix(size_t rows, size_t cols, const ComponentType& fillValue) : shape({rows, cols}), 
+        buffer(std::vector<ComponentType>(rows * cols)), originalShape({rows, cols})  {
+        #pragma omp parallel for schedule(static)
+        for(size_t j = 0; j < shape[1]; j++) {
+            for(size_t i = 0; i < shape[0]; i++) {
+                buffer[(shape[0] * j) + i] = fillValue;
+            }
+        }
+    }
+
+    // Constructor for matrix of certain size with constant fill-value.
+    Matrix(size_t rows, size_t cols, const ComponentType& fillValue, const std::vector<size_t> &restrictFrom) : shape({rows, cols}), 
+        buffer(std::vector<ComponentType>(rows * cols)), originalShape(restrictFrom)  {
+        #pragma omp parallel for schedule(static)
+        for(size_t j = 0; j < shape[1]; j++) {
+            for(size_t i = 0; i < shape[0]; i++) {
+                buffer[(shape[0] * j) + i] = fillValue;
+            }
+        }
+    }
+
+    // Constructing matrix from file.
+    Matrix(const char *path) {
+        if (FILE *file = fopen(path, "r")) {
+            fclose(file);
+            readFromImage(path);
+        } else {
+            std::cerr << "The file \"" << path << "\" does not exist!\n";
+            exit(-1);
+        }
+    }
+
+    // Copy-constructor.
+    Matrix(const Matrix< ComponentType >& other) {
+        //std::cout << "Copy-constructor" << std::endl;
+        this->shape = other.shape;
+        this->originalShape = other.originalShape;
+        this->buffer = std::vector<ComponentType>(this->shape[0] * this->shape[1]);
+        #pragma omp parallel for schedule(static)
+        for(size_t j = 0; j < shape[1]; j++) {
+            for(size_t i = 0; i < shape[0]; i++) {
+                buffer[(shape[0] * j) + i] = other.buffer[(shape[0] * j) + i];
+            }
+        }
+    }
+
+    // Move-constructor.
+    Matrix(Matrix< ComponentType >&& other) noexcept {
+        this->shape = other.shape;
+        this->originalShape = other.originalShape;   
+        this->buffer = std::move(other.buffer);
+    }
+
+    inline std::vector<size_t> getShape() const {
+        return shape;
+    }
+
+    const std::vector<size_t> getOriginalShape() {
+        return originalShape;
+    }
+
+    // Copy-assignment
+    Matrix&
+    operator=(const Matrix< ComponentType >& other) {
+        //std::cout << "Copy-assignment" << std::endl;
+        this->shape = other.shape;
+        this->originalShape = other.originalShape;
+        #pragma omp parallel for schedule(static)
+        for(size_t j = 0; j < shape[1]; j++) {
+            for(size_t i = 0; i < shape[0]; i++) {
+                buffer[(shape[0] * j) + i] = other.buffer[(shape[0] * j) + i];
+            }
+        }
+        return *this;
+    }
+
+    // Move-assignment
+    Matrix&
+    operator=(Matrix< ComponentType >&& other) noexcept {
+        //std::cout << "Move-assignment" << std::endl;
+        this->shape = other.shape;
+        this->originalShape = other.originalShape;
+        this->buffer = std::move(other.buffer);
+        return *this;
+    }
+
+    // Number of rows.
+    [[nodiscard]] inline size_t rows() const {
+        return shape[0];
+    }
+
+    // Number of columns
+    [[nodiscard]] inline size_t cols() const {
+        return shape[1];
+    }
+
+    // Element access function
+    inline const ComponentType&
+    operator()(size_t row, size_t col) const {
+        return buffer[shape[0] * col + row];
+    }
+
+    // Element mutation function
+    inline ComponentType&
+    operator()(size_t row, size_t col) {
+        return buffer[shape[0] * col + row];
+    }
+
+    // In-class element access function
+    inline const ComponentType&
+    get(size_t row, size_t col) const {
+        return buffer[shape[0] * col + row];
+    }
+
+    // In-class element mutation function
+    inline ComponentType&
+    get(size_t row, size_t col) {
+         return buffer[shape[0] * col + row];
+    }
+
+    inline void checkIndex(size_t row, size_t col){
+        if(row >= shape[0] || col >= shape[1])
+            std::cout << "wrong index!\n";
+    }
+
+    // Compound assignment
+    Matrix& operator+=(const Matrix& rhs) {
+
+        assert(this->shape[0] == rhs.shape[0]);
+        assert(this->shape[1] == rhs.shape[1]);
+
+        /* addition of rhs to *this takes place here */
+        #pragma omp parallel for schedule(static)
+        for(size_t j = 0; j < shape[1]; j++) {
+            for(size_t i = 0; i < shape[0]; i++) {
+                this->buffer[(shape[0] * j) + i] = this->buffer[(shape[0] * j) + i] + rhs.buffer[(shape[0] * j) + i];
+            }
+        } 
+
+        // return the result by reference
+        return *this; 
+    }
+
+    // Friends defined inside class body are inline and are hidden from non-ADL lookup
+    // passing lhs by value helps optimize chained a+b+c
+    // otherwise, both parameters may be const references
+    friend Matrix operator+(Matrix lhs, const Matrix& rhs) {
+        lhs += rhs; // reuse compound assignment
+        return lhs; // return the result by value (uses move constructor)
+    }
+
+    Matrix& operator+=(ComponentType rhs) {
+
+        /* addition of rhs to *this takes place here */
+        #pragma omp parallel for schedule(static)
+        for(size_t j = 0; j < shape[1]; j++) {
+            for(size_t i = 0; i < shape[0]; i++) {
+                this->buffer[(shape[0] * j) + i] = this->buffer[(shape[0] * j) + i] + rhs;
+            }
+        } 
+
+        // return the result by reference
+        return *this; 
+    }
+
+    friend Matrix operator+(Matrix lhs, ComponentType rhs) {
+        lhs += rhs; // reuse compound assignment
+        return lhs; // return the result by value (uses move constructor)
+    }
+
+        // Compound assignment
+    Matrix& operator*=(const Matrix& rhs) {
+
+        assert(this->shape[0] == rhs.shape[0]);
+        assert(this->shape[1] == rhs.shape[1]);
+
+        /* addition of rhs to *this takes place here */
+        #pragma omp parallel for schedule(static)
+        for(size_t j = 0; j < shape[1]; j++) {
+            for(size_t i = 0; i < shape[0]; i++) {
+                this->buffer[(shape[0] * j) + i] = this->buffer[(shape[0] * j) + i] * rhs.buffer[(shape[0] * j) + i];
+            }
+        } 
+
+        // return the result by reference
+        return *this; 
+    }
+
+    // Friends defined inside class body are inline and are hidden from non-ADL lookup
+    // passing lhs by value helps optimize chained a+b+c
+    // otherwise, both parameters may be const references
+    friend Matrix operator*(Matrix lhs, const Matrix& rhs) {
+        lhs *= rhs; // reuse compound assignment
+        return lhs; // return the result by value (uses move constructor)
+    }
+
+    Matrix& operator*=(ComponentType rhs) {
+
+        /* addition of rhs to *this takes place here */
+        #pragma omp parallel for schedule(static)
+        for(size_t j = 0; j < shape[1]; j++) {
+            for(size_t i = 0; i < shape[0]; i++) {
+                this->buffer[(shape[0] * j) + i] = this->buffer[(shape[0] * j) + i] * rhs;
+            }
+        } 
+
+        // return the result by reference
+        return *this;
+    }
+
+    // Friends defined inside class body are inline and are hidden from non-ADL lookup
+    // passing lhs by value helps optimize chained a+b+c
+    // otherwise, both parameters may be const references
+    friend Matrix operator*(Matrix lhs, ComponentType rhs) {
+        lhs *= rhs; // reuse compound assignment
+        return lhs; // return the result by value (uses move constructor)
+    }
+
+    inline ComponentType norm(bool l2) {
+        if(l2)
+            return l2Norm();
+        else
+            return linfNorm();
+    }
+
+    inline ComponentType l2Norm() {
+        ComponentType norm = 0.;
+
+        #pragma omp parallel for schedule(static) reduction(+:norm)
+        for (size_t j = 1; j < shape[1] - 1; j += 1)
+            for(size_t i = 1; i < shape[0] - 1; i += 1)
+                norm += get(i,j) * get(i,j);
+
+        return sqrt(norm);
+    }
+
+    inline ComponentType linfNorm() {
+        ComponentType norm = 0.;
+
+        #pragma omp parallel for schedule(static) reduction(max:norm)
+        for (size_t j = 1; j < shape[1] - 1; j += 1)
+            for(size_t i = 1; i < shape[0] - 1; i += 1)
+                if(norm < abs(get(i,j)))
+                    norm = abs(get(i,j));
+
+        return norm;
+    }
+
+    // Prolongate function
+    Matrix prolongate() {
+        Matrix prolongated(originalShape[0], originalShape[1], 0.);
+
+        #pragma omp parallel for schedule(static)
+        for (size_t mat_col = 1; mat_col < cols() - 1; mat_col += 1) {
+            for (size_t mat_row = 1; mat_row < rows() - 1; mat_row += 1) {
+                prolongated.get(mat_row * 2, mat_col * 2) += get(mat_row, mat_col);
+                prolongated.get(mat_row * 2 + 1, mat_col * 2 + 1) += 0.25 * get(mat_row, mat_col);
+                prolongated.get(mat_row * 2 + 1, mat_col * 2 - 1) += 0.25 * get(mat_row, mat_col);
+                prolongated.get(mat_row * 2 - 1, mat_col * 2 - 1) += 0.25 * get(mat_row, mat_col);
+                prolongated.get(mat_row * 2 - 1, mat_col * 2 + 1) += 0.25 * get(mat_row, mat_col);
+                prolongated.get(mat_row * 2, mat_col * 2 - 1) += 0.5 * get(mat_row, mat_col);
+                prolongated.get(mat_row * 2, mat_col * 2 + 1) += 0.5 * get(mat_row, mat_col);
+                prolongated.get(mat_row * 2 - 1, mat_col * 2) += 0.5 * get(mat_row, mat_col);
+                prolongated.get(mat_row * 2 + 1, mat_col * 2) += 0.5 * get(mat_row, mat_col);
+            }
+        }
+
+        // return the result by reference
+        return prolongated;
+    }
+
+    inline const ComponentType computeWeightedSum(size_t row, size_t col) {
+        ComponentType edges = get(row, col-1) + get(row, col+1) + get(row-1, col) + get(row+1, col);
+        ComponentType corners = get(row-1, col-1) + get(row-1, col+1) + get(row+1, col-1) + get(row+1, col+1);
+        return get(row, col) / 4 + edges / 8 + corners / 16;
+    }
+
+    // Restrict function
+    Matrix restrict() {
+
+        size_t rows2H = ((rows() - 2) / 2) + 2;
+        size_t cols2H = ((cols() - 2) / 2) + 2;
+
+        Matrix restricted(rows2H, cols2H, 0., shape);
+
+        #pragma omp parallel for schedule(static)
+        for (size_t mat_col = 1; mat_col < restricted.cols() - 1; mat_col += 1) {
+            for (size_t mat_row = 1; mat_row < restricted.rows() - 1; mat_row += 1) {
+                restricted.get(mat_row, mat_col) = computeWeightedSum(mat_row * 2, mat_col * 2);
+            }
+        }
+
+        return restricted;
+    }
+
+    //CImg IO
+    void readFromImage(const char *path)
+    {
+        CImg< unsigned char > img(path);
+
+        size_t cols = img.width() + 2;
+        size_t rows = img.height() + 2;
+        shape = std::vector({rows, cols});
+
+        buffer = std::vector<ComponentType>(cols * rows, 1.0);
+
+        for (size_t col = 1; col < (shape[1] - 1); col += 1) {
+            for(size_t row = 1; row < (shape[0] - 1); row += 1) {
+                buffer[(shape[0] * col) + row] = std::clamp((img((col - 1), (row - 1)) / 255.0f), 0.0f, 1.0f);
+            }
+        }
+
+        img.assign();
+    }
+
+    void writeToImage(std::string fileName) {
+        CImg< unsigned char> img((shape[1] - 2), (shape[0] - 2), 1, 1);
+
+        for(size_t y = 1; y < (shape[1] - 1); y++)
+            for (size_t x = 1; x < (shape[0] - 1); x++)
+            {
+                double color = (get(x, y) + 1.0) * 0.5 * 255.0;
+                img((y - 1), (x - 1)) = (unsigned char) (std::clamp(color, 0.0, 255.0));
+            }
+                
+        img.save_bmp(fileName.c_str());
+        img.assign();
+    }
+
+
+private:
+    std::vector< size_t > shape;
+    std::vector<ComponentType> buffer;
+    std::vector< size_t > originalShape;
+
+};
+
+// // Performs a matrix-vector multiplication.
+// template< typename ComponentType >
+// Vector< ComponentType > matvec(const Matrix< ComponentType >& mat, const Vector< ComponentType >& vec)
+// {
+//     Vector< ComponentType > result;
+//     for (size_t mat_row = 0; mat_row < mat.rows(); mat_row += 1) {
+//         result(mat_row) = 0;
+//         for (size_t vec_row = 0; vec_row < vec.size(); vec_row += 1) {
+//             result(mat_row) += mat(mat_row, vec_row) * vec(vec_row);
+//         }
+//     }
+//     return result;
+// }
+
+template< typename ComponentType >
+// Stream output function for debugging
+std::ostream& operator<<(std::ostream& os, const Matrix< ComponentType >& mat) {
+        // write mat to stream
+        os << "Shape: { " << mat.rows() << ", " << mat.cols() << " }" << std::endl;
+        for (size_t mat_row = 0; mat_row < mat.rows(); mat_row += 1) {
+            for (size_t mat_col = 0; mat_col < mat.cols(); mat_col += 1) {
+                os << mat(mat_row, mat_col) << "\t";
+            }
+            os << "\n";
+        }
+        return os;
+}
+
+template< typename ComponentType >
+inline const ComponentType cmp(Matrix<ComponentType> a, Matrix<ComponentType> b, bool l2) {
+
+    ComponentType difference = 0.;
+    assert(a.rows() == b.rows());
+    assert(a.cols() == b.cols());
+
+    if(l2) {
+        #pragma omp parallel for schedule(static) reduction(+:difference)
+        for(size_t j = 1; j < a.cols() - 1; j++) {
+            for(size_t i = 1; i < a.rows() - 1; i++) {
+                difference += (a(i, j) - b(i, j)) * (a(i, j) - b(i, j));
+            }
+        }
+        difference = sqrt(difference);
+    }
+    else {
+        #pragma omp parallel for schedule(static) reduction(max:difference)
+        for(size_t j = 1; j < a.cols() - 1; j++) {
+            for(size_t i = 1; i < a.rows() - 1; i++) {
+                if(difference < abs(a(i, j) - b(i, j)))
+                    difference = abs(a(i, j) - b(i, j));
+            }
+        }
+    }
+
+    return difference;
+}
